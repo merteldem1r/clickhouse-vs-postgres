@@ -77,8 +77,6 @@ ClickHouse: Success: 20, Rejected: 0  (all duplicates stored)
 ClickHouse rows with email 'duplicate_test@example.com': 20
 ```
 
-No amount of application-level checks can prevent this in ClickHouse because the SELECT-then-INSERT pattern is inherently racy under concurrency.
-
 **PostgreSQL** — 1 row accepted, 19 rejected:
 
 ![PG Duplicate](images/pg-duplicate.png)
@@ -86,6 +84,36 @@ No amount of application-level checks can prevent this in ClickHouse because the
 **ClickHouse** — 20 duplicates stored:
 
 ![CH Duplicate](images/ch-duplicate.png)
+
+#### Why Application-Level Workarounds Don't Fix This
+
+What if check the email exists before inserting. I tested this — SELECT before INSERT with 20 concurrent goroutines:
+
+```
+ClickHouse (check-before-insert): Inserted: 20, Skipped: 0, Failed: 0
+ClickHouse rows with email: 20 (duplicates despite check-before-insert!)
+```
+
+All 20 goroutines read `count = 0` before any insert became visible, then all 20 inserted. This is a classic **TOCTOU (Time-of-Check-Time-of-Use)** race condition. Here's why every application-level approach fails:
+
+| Approach | Why It Fails |
+| --- | --- |
+| **SELECT then INSERT** | TOCTOU race — multiple readers see "not found" before any write lands. ClickHouse has no row locks to serialize this window. |
+| **Application mutex** | Only protects a single process. In production with multiple app instances behind a load balancer, each instance has its own mutex — the race condition returns between processes. |
+| **Distributed lock (Redis/etcd)** | Technically works, but adds a network round-trip and a single point of failure to every insert. You're building a constraint engine outside the database — fragile, slow, and defeats ClickHouse's throughput advantage. |
+| **ReplacingMergeTree engine** | Deduplicates rows with the same `ORDER BY` key, but only during **background merges** which happen asynchronously. Duplicates exist between merges and queries return them unless you use `SELECT ... FINAL` (which forces a merge at read time and is significantly slower). This is eventual cleanup, not a constraint. |
+| **INSERT ... IF NOT EXISTS** | Does not exist in ClickHouse. There is no conditional insert syntax. |
+| **ON CONFLICT / ON DUPLICATE KEY** | Does not exist in ClickHouse. These are OLTP constructs that require unique index lookups at write time — the opposite of ClickHouse's append-only design. |
+
+#### Why PostgreSQL Gets This Right
+
+PostgreSQL enforces `UNIQUE` at the **storage engine level**. When two transactions try to insert the same email concurrently, the second one blocks on the index lock until the first commits, then receives a constraint violation error. This guarantee holds regardless of:
+
+- How many application instances are running
+- How many concurrent requests arrive
+- Whether the application has any awareness of duplicates at all
+
+This is the fundamental difference: **PostgreSQL treats uniqueness as a database guarantee, ClickHouse treats it as an application problem.** For data where duplicates mean broken authentication, double charges, or corrupted user profiles — you need the guarantee, not a best-effort workaround.
 
 ### 4. Transaction Atomicity
 

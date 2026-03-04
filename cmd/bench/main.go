@@ -17,13 +17,26 @@ func main() {
 }
 
 func run() error {
-	cfg, err := config.LoadConfig()
+	fmt.Println("ClickHouse vs PostgreSQL")
 
+	// Config load
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("Error loading config: %w", err)
 	}
 
 	ctx := context.Background()
+
+	// Migrations
+	err = database.RunMigrations("PostgreSQL", cfg.PostgresDSN, "migrations/postgres")
+	if err != nil {
+		return fmt.Errorf("Error running PostgreSQL migrations: %w", err)
+	}
+
+	err = database.RunMigrations("ClickHouse", cfg.ClickHouseDSN, "migrations/clickhouse")
+	if err != nil {
+		return fmt.Errorf("Error running ClickHouse migrations: %w", err)
+	}
 
 	// ClickHouse connection
 	ch, err := database.NewClickHouse(ctx, cfg.ClickHouseDSN)
@@ -31,6 +44,7 @@ func run() error {
 		return fmt.Errorf("Error creating ClickHouse connection: %w", err)
 	}
 	defer ch.Close()
+	fmt.Printf("Connected to ClickHouse: %s\n", cfg.ClickHouseDSN)
 
 	// PostgreSQL connection
 	pg, err := database.NewPostgreSQL(ctx, cfg.PostgresDSN)
@@ -38,8 +52,7 @@ func run() error {
 		return fmt.Errorf("Error creating PostgreSQL connection: %w", err)
 	}
 	defer pg.Close()
-
-	fmt.Println("ClickHouse & PostgreSQL")
+	fmt.Printf("Connected to PostgreSQL: %s\n", cfg.PostgresDSN)
 
 	return nil
 }

@@ -23,7 +23,7 @@ func NewClickHouse(ctx context.Context, dsn string) (clickhouse.Conn, error) {
 		if exception, ok := err.(*clickhouse.Exception); ok {
 			fmt.Printf("Exception [%d] %s \n%s\n", exception.Code, exception.Message, exception.StackTrace)
 		}
-		return nil, err
+		return nil, fmt.Errorf("clickhouse: ping: %w", err)
 	}
 
 	return conn, nil

@@ -187,7 +187,7 @@ ClickHouse-PostgreSQL-Bench/
 │   │   ├── point_lookup.go        # Benchmark 1
 │   │   ├── single_update.go       # Benchmark 2
 │   │   ├── unique_constraint.go   # Benchmark 3
-│   │   ├── transaction.go          # Benchmark 4
+│   │   ├── transaction.go         # Benchmark 4
 │   │   ├── bulk_insert.go         # Benchmark 5
 │   │   └── aggregation.go         # Benchmark 6
 │   ├── config/config.go           # Env configuration

@@ -57,27 +57,24 @@ func run() error {
 	defer pg.Close()
 	fmt.Printf("Connected to PostgreSQL: %s\n", cfg.PostgresDSN)
 
-	// Seeding data
+	// Truncate and seed fresh data
 	seeder := seed.NewSeed(pg, cfg.PostgresMainDB, ch, cfg.ClickHouseMainDB)
 
-	// Seed 10k users or load existing
-	var count int
-	pg.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count)
-
-	var users []models.User
-	if count > 0 {
-		fmt.Printf("Users already seeded: %d\n", count)
-		users, err = seed.LoadUsers(ctx, pg)
-		if err != nil {
-			return fmt.Errorf("Error loading users: %w", err)
-		}
-	} else {
-		users, err = seeder.Users(ctx, 10000)
-		if err != nil {
-			return fmt.Errorf("Error seeding users: %w", err)
-		}
-		fmt.Printf("Seeded %d users\n", len(users))
+	if _, err := pg.Exec(ctx, "TRUNCATE TABLE users, trades"); err != nil {
+		return fmt.Errorf("Error truncating PG tables: %w", err)
 	}
+	if err := ch.Exec(ctx, "TRUNCATE TABLE users"); err != nil {
+		return fmt.Errorf("Error truncating CH users: %w", err)
+	}
+	if err := ch.Exec(ctx, "TRUNCATE TABLE trades"); err != nil {
+		return fmt.Errorf("Error truncating CH trades: %w", err)
+	}
+
+	users, err := seeder.Users(ctx, 10000)
+	if err != nil {
+		return fmt.Errorf("Error seeding users: %w", err)
+	}
+	fmt.Printf("Seeded %d users\n", len(users))
 
 	// ******************************** Benchmark 1: Point Lookup ********************************
 	var pickedUsersCount int = 200
@@ -121,6 +118,36 @@ func run() error {
 	}
 	if err := benchmarks.UniqueConstraintCH(ctx, ch, duplicateEmail, 20); err != nil {
 		return fmt.Errorf("Error running CH unique constraint: %w", err)
+	}
+
+	// ******************************** Benchmark 4: Bulk Insert ********************************
+	bulkCounts := []int{100_000, 500_000, 1_000_000}
+
+	for i, count := range bulkCounts {
+		fmt.Printf("\n--- Bulk Insert Benchmark Run #%d (%d rows) ---\n", i+1, count)
+
+		trades := benchmarks.GenerateTrades(count)
+
+		// Truncate trades before each run
+		pg.Exec(ctx, "TRUNCATE TABLE trades")
+		ch.Exec(ctx, "TRUNCATE TABLE trades")
+
+		if err := benchmarks.BulkInsertPG(ctx, pg, trades); err != nil {
+			return fmt.Errorf("Error running PG bulk insert: %w", err)
+		}
+		if err := benchmarks.BulkInsertCH(ctx, ch, trades); err != nil {
+			return fmt.Errorf("Error running CH bulk insert: %w", err)
+		}
+	}
+
+	// ******************************** Benchmark 5: Aggregation ********************************
+	fmt.Printf("\n--- Aggregation Benchmark (over %d rows) ---\n", bulkCounts[len(bulkCounts)-1])
+
+	if err := benchmarks.AggregationPG(ctx, pg); err != nil {
+		return fmt.Errorf("Error running PG aggregation: %w", err)
+	}
+	if err := benchmarks.AggregationCH(ctx, ch); err != nil {
+		return fmt.Errorf("Error running CH aggregation: %w", err)
 	}
 
 	return nil

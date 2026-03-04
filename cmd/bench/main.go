@@ -150,5 +150,16 @@ func run() error {
 		return fmt.Errorf("Error running CH aggregation: %w", err)
 	}
 
+	// ******************************** Benchmark 6: Transaction Atomicity ********************************
+	fmt.Printf("\n--- Transaction Atomicity Benchmark ---\n")
+	testUser := users[0]
+
+	if err := benchmarks.TransactionPG(ctx, pg, testUser); err != nil {
+		return fmt.Errorf("Error running PG transaction: %w", err)
+	}
+	if err := benchmarks.TransactionCH(ctx, ch, testUser); err != nil {
+		return fmt.Errorf("Error running CH transaction: %w", err)
+	}
+
 	return nil
 }

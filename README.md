@@ -9,6 +9,7 @@ A Go benchmark suite that compares ClickHouse (OLAP) and PostgreSQL (OLTP) acros
 | Point Lookup (5K queries)         | 40µs/query              | 970µs/query             | **PG ~24x faster**  |
 | Single-Row UPDATE (250)           | 151µs/update            | 3.9ms/update            | **PG ~26x faster**  |
 | UNIQUE Constraint (20 concurrent) | 1 accepted, 19 rejected | 20 accepted, 0 rejected | **PG (correct)**    |
+| Transaction Atomicity             | Rolled back cleanly     | Partially corrupted     | **PG (correct)**    |
 | Bulk Insert (1M rows)             | 98K rows/sec            | 2.7M rows/sec           | **CH ~28x faster**  |
 | Aggregation (1M rows)             | 47-130ms                | 10-21ms                 | **CH 5-12x faster** |
 
@@ -77,7 +78,51 @@ ClickHouse rows with email 'duplicate_test@example.com': 20
 
 No amount of application-level checks can prevent this in ClickHouse because the SELECT-then-INSERT pattern is inherently racy under concurrency.
 
-### 4. Bulk Insert Throughput
+**PostgreSQL** — 1 row accepted, 19 rejected:
+
+![PG Duplicate](images/pg-duplicate.png)
+
+**ClickHouse** — 20 duplicates stored:
+
+![CH Duplicate](images/ch-duplicate.png)
+
+### 4. Transaction Atomicity
+
+**Tests:** A 3-step "deactivate user" operation where step 3 fails — simulating a real-world multi-step flow like login (verify password → delete old tokens → issue new token).
+
+PostgreSQL wraps all steps in `BEGIN`/`COMMIT`. If any step fails, `ROLLBACK` undoes everything — the user is unchanged. ClickHouse has no transactions. Each mutation is independent and permanently committed. If step 3 fails, steps 1 and 2 cannot be undone.
+
+```
+PostgreSQL — 3-step transaction with ROLLBACK:
+  Before: name="user_0", is_active=true
+  Step 1 (set is_active=false): OK
+  Step 2 (append [DEACTIVATED] to name): OK
+  Step 3 (set email=NULL): FAILED — violates not-null constraint
+  ROLLBACK executed — all changes undone
+  After:  name="user_0", is_active=true
+  Result: User is UNCHANGED
+
+ClickHouse — 3-step operation with NO rollback:
+  Before: name="user_0", is_active=true
+  Step 1 (set is_active=0): OK — permanently committed
+  Step 2 (append [DEACTIVATED] to name): OK — permanently committed
+  Step 3: FAILED
+  NO ROLLBACK available — steps 1 and 2 cannot be undone
+  After:  name="user_0 [DEACTIVATED]", is_active=0
+  Result: User is CORRUPTED
+```
+
+This is the most dangerous failure mode for application data. A failed login attempt, interrupted password reset, or crashed deactivation flow leaves the database in an inconsistent state with no recovery path.
+
+**PostgreSQL** — rolled back, user unchanged:
+
+![PG Transaction](images/pg-transaction.png)
+
+**ClickHouse** — partially corrupted, no undo:
+
+![CH Transaction](images/ch-transaction.png)
+
+### 5. Bulk Insert Throughput (CH wins)
 
 **Tests:** Batch insert of market trade data (symbol, price, volume, timestamp) — simulating exchange data ingestion.
 
@@ -99,7 +144,7 @@ ClickHouse:  363ms    (2.8M rows/sec)
 
 PG throughput decreases as volume grows (index maintenance compounds). CH throughput increases (larger batches amortize data part creation).
 
-### 5. Analytical Aggregation
+### 6. Analytical Aggregation (CH wins)
 
 **Tests:** Three analytical queries over 1M trade rows — the core OLAP workload.
 
@@ -142,8 +187,9 @@ ClickHouse-PostgreSQL-Bench/
 │   │   ├── point_lookup.go        # Benchmark 1
 │   │   ├── single_update.go       # Benchmark 2
 │   │   ├── unique_constraint.go   # Benchmark 3
-│   │   ├── bulk_insert.go         # Benchmark 4
-│   │   └── aggregation.go         # Benchmark 5
+│   │   ├── transaction.go          # Benchmark 4
+│   │   ├── bulk_insert.go         # Benchmark 5
+│   │   └── aggregation.go         # Benchmark 6
 │   ├── config/config.go           # Env configuration
 │   ├── models/                    # User and Trade structs
 │   └── seed/seed.go               # Data seeding

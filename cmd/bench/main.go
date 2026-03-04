@@ -60,7 +60,7 @@ func run() error {
 	// Truncate and seed fresh data
 	seeder := seed.NewSeed(pg, cfg.PostgresMainDB, ch, cfg.ClickHouseMainDB)
 
-	if _, err := pg.Exec(ctx, "TRUNCATE TABLE users, trades"); err != nil {
+	if _, err := pg.Exec(ctx, "TRUNCATE TABLE users, trades, user_filters"); err != nil {
 		return fmt.Errorf("Error truncating PG tables: %w", err)
 	}
 	if err := ch.Exec(ctx, "TRUNCATE TABLE users"); err != nil {
@@ -68,6 +68,9 @@ func run() error {
 	}
 	if err := ch.Exec(ctx, "TRUNCATE TABLE trades"); err != nil {
 		return fmt.Errorf("Error truncating CH trades: %w", err)
+	}
+	if err := ch.Exec(ctx, "TRUNCATE TABLE user_filters"); err != nil {
+		return fmt.Errorf("Error truncating CH user_filters: %w", err)
 	}
 
 	users, err := seeder.Users(ctx, 10000)
@@ -159,6 +162,29 @@ func run() error {
 	}
 	if err := benchmarks.TransactionCH(ctx, ch, testUser); err != nil {
 		return fmt.Errorf("Error running CH transaction: %w", err)
+	}
+
+	// ******************************** Benchmark 7: Partial JSON Update ********************************
+	// Seed user_filters (one per user)
+	userFilters, err := seeder.UserFilters(ctx, users)
+	if err != nil {
+		return fmt.Errorf("Error seeding user_filters: %w", err)
+	}
+	fmt.Printf("Seeded %d user_filters\n", len(userFilters))
+
+	var partialUpdateCount int = 50
+
+	for i := range 3 {
+		pickedFilters := benchmarks.PickRandomFilters(userFilters, partialUpdateCount)
+
+		fmt.Printf("\n--- Partial JSON Update Benchmark Run #%d (%d updates) ---\n", i+1, len(pickedFilters))
+		if err := benchmarks.PartialUpdatePG(ctx, pg, pickedFilters); err != nil {
+			return fmt.Errorf("Error running PG partial update: %w", err)
+		}
+		if err := benchmarks.PartialUpdateCH(ctx, ch, pickedFilters); err != nil {
+			return fmt.Errorf("Error running CH partial update: %w", err)
+		}
+		partialUpdateCount *= 5
 	}
 
 	return nil

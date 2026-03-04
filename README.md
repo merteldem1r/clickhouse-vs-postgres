@@ -4,16 +4,17 @@ A Go benchmark suite that compares ClickHouse (OLAP) and PostgreSQL (OLTP) acros
 
 ## Results Summary
 
-| Benchmark                         | PostgreSQL              | ClickHouse              | Winner              |
-| --------------------------------- | ----------------------- | ----------------------- | ------------------- |
-| Point Lookup (5K queries)         | 40µs/query              | 970µs/query             | **PG ~24x faster**  |
-| Single-Row UPDATE (250)           | 151µs/update            | 3.9ms/update            | **PG ~26x faster**  |
-| UNIQUE Constraint (20 concurrent) | 1 accepted, 19 rejected | 20 accepted, 0 rejected | **PG (correct)**    |
-| Transaction Atomicity             | Rolled back cleanly     | Partially corrupted     | **PG (correct)**    |
-| Bulk Insert (1M rows)             | 98K rows/sec            | 2.7M rows/sec           | **CH ~28x faster**  |
-| Aggregation (1M rows)             | 47-130ms                | 10-21ms                 | **CH 5-12x faster** |
+| Benchmark                         | PostgreSQL              | ClickHouse              | Winner               |
+| --------------------------------- | ----------------------- | ----------------------- | -------------------- |
+| Point Lookup (5K queries)         | 40µs/query              | 970µs/query             | **PG ~24x faster**   |
+| Single-Row UPDATE (250)           | 151µs/update            | 3.9ms/update            | **PG ~26x faster**   |
+| UNIQUE Constraint (20 concurrent) | 1 accepted, 19 rejected | 20 accepted, 0 rejected | **PG (correct)**     |
+| Transaction Atomicity             | Rolled back cleanly     | Partially corrupted     | **PG (correct)**     |
+| Partial JSON Update (1250)        | ~116µs/update           | ~8.7ms/update           | **PG ~75x faster**   |
+| Bulk Insert (1M rows)             | 98K rows/sec            | 2.7M rows/sec           | **CH ~28x faster**   |
+| Aggregation (1M rows)             | 47-130ms                | 10-21ms                 | **CH 5-12x faster**  |
 
-> Tested on Apple M2, PostgreSQL 15.13, ClickHouse 25.11.2, 10K users + 1M trades.
+> Tested on Apple M2, PostgreSQL 15.13, ClickHouse 25.11.2, 10K users + 10K user_filters + 1M trades.
 
 ---
 
@@ -122,7 +123,35 @@ This is the most dangerous failure mode for application data. A failed login att
 
 ![CH Transaction](images/ch-transaction.png)
 
-### 5. Bulk Insert Throughput (CH wins)
+### 5. Partial JSON Update
+
+**Tests:** Partial modification of a JSONB filter document — changing a single key, updating a nested path, and appending to an array. Simulates updating user preferences, saved search filters, or notification settings.
+
+PostgreSQL uses `jsonb_set()` to surgically modify one key inside the document in a single atomic SQL statement — the rest of the document is untouched. ClickHouse has no server-side JSON mutation function, so the application must: read the full document, deserialize in Go, modify, re-serialize, then write back the entire string via `ALTER TABLE UPDATE`.
+
+```
+--- Run #1 (50 updates) ---
+                          PostgreSQL        ClickHouse
+Scalar (sort_by):         182µs/update      9.3ms/update
+Nested (price_range.max): 129µs/update      8.6ms/update
+Array append (brands):    136µs/update      8.6ms/update
+
+--- Run #2 (250 updates) ---
+                          PostgreSQL        ClickHouse
+Scalar (sort_by):         159µs/update      8.6ms/update
+Nested (price_range.max): 106µs/update      8.5ms/update
+Array append (brands):    100µs/update      8.7ms/update
+
+--- Run #3 (1250 updates) ---
+                          PostgreSQL        ClickHouse
+Scalar (sort_by):         121µs/update      8.5ms/update
+Nested (price_range.max): 114µs/update      8.7ms/update
+Array append (brands):    113µs/update      8.8ms/update
+```
+
+All three scenarios perform nearly identically within each database. For PG, the cost is the B-tree lookup + WAL write — `jsonb_set()` path depth doesn't matter at this document size. For CH, the bottleneck is the mutation mechanism (rewriting the entire data part), not the JSON operation itself.
+
+### 6. Bulk Insert Throughput (CH wins)
 
 **Tests:** Batch insert of market trade data (symbol, price, volume, timestamp) — simulating exchange data ingestion.
 
@@ -144,7 +173,7 @@ ClickHouse:  363ms    (2.8M rows/sec)
 
 PG throughput decreases as volume grows (index maintenance compounds). CH throughput increases (larger batches amortize data part creation).
 
-### 6. Analytical Aggregation (CH wins)
+### 7. Analytical Aggregation (CH wins)
 
 **Tests:** Three analytical queries over 1M trade rows — the core OLAP workload.
 
@@ -166,17 +195,15 @@ PostgreSQL  →  "Who can see what, and how"    (auth, access control, config, a
 ClickHouse  →  "What happened on the exchange" (market data, metrics, time-series events)
 ```
 
-- **Use PostgreSQL** when data needs: transactions, UNIQUE/FK constraints, instant mutations, point lookups
+- **Use PostgreSQL** when data needs: transactions, UNIQUE/FK constraints, instant mutations, point lookups, partial JSON updates
 - **Use ClickHouse** when data is: append-only, time-series, high-volume, queried with aggregations
-
-Neither database should attempt the other's job.
 
 ---
 
 ## Project Structure
 
 ```
-ClickHouse-PostgreSQL-Bench/
+clickhouse-vs-postgres/
 ├── cmd/bench/main.go              # Entry point
 ├── database/
 │   ├── clickhouse.go              # CH connection
@@ -188,10 +215,11 @@ ClickHouse-PostgreSQL-Bench/
 │   │   ├── single_update.go       # Benchmark 2
 │   │   ├── unique_constraint.go   # Benchmark 3
 │   │   ├── transaction.go         # Benchmark 4
-│   │   ├── bulk_insert.go         # Benchmark 5
-│   │   └── aggregation.go         # Benchmark 6
+│   │   ├── partial_update.go      # Benchmark 5
+│   │   ├── bulk_insert.go         # Benchmark 6
+│   │   └── aggregation.go         # Benchmark 7
 │   ├── config/config.go           # Env configuration
-│   ├── models/                    # User and Trade structs
+│   ├── models/                    # User, Trade, and UserFilter structs
 │   └── seed/seed.go               # Data seeding
 ├── migrations/
 │   ├── clickhouse/                # CH migration SQL files
